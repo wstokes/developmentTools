@@ -1,0 +1,105 @@
+#!/bin/bash
+
+if [ -z "$1" ]; then
+  echo "Usage: $0 bundle"
+  exit
+fi
+
+auditDirectory()
+{
+  local directory=$1
+
+  for entry in `ls "$directory"`; do
+    local path="$directory/$entry"
+
+    #Skip symbolic links
+    if [ -L "$path" ]; then
+     continue
+    #Recurse on subdirectory
+    elif [ -d "$path" ]; then
+      auditDirectory "$path"
+    #Audit executable files
+    elif [ -x "$path" ]; then
+      auditFile "$path"
+    fi
+  done
+}
+
+auditFile()
+{  
+  local file=$1
+  local name=`basename $file`
+
+  #Flag images that are mistakingly marked as executable
+  if [[ "$name" = *.png ]]; then
+    echo "Error, image marked as executable! [ $file ]"
+    errors=1
+    return
+  fi
+
+  auditPaths "$file" -l
+  auditPaths "$file" -L
+}
+
+auditPaths()
+{
+  local file=$1
+  local args=$2
+
+  otool $args "$file" > $tempFile
+
+  local expression="^([[:blank:]]+(path|name))?[[:blank:]]+(@[^\/]+)?(\/.+)"
+
+  while IFS= read -r line; do
+    [[ $line =~ $expression ]]
+    local KEY=${BASH_REMATCH[2]}
+    local RELATIVE_PATH=${BASH_REMATCH[3]}
+    local PATH=${BASH_REMATCH[4]}
+
+    local safe=0
+
+    #skip line if no match
+    if [ -z "$PATH" ]; then
+      continue
+    #ignore lines that use relative path that start with @ e.g. @executable_path, @rpath, and @loader_path
+    elif [ ! -z "$RELATIVE_PATH" ]; then
+      safe=1
+    #allow absolute paths to standard locations
+    elif [[ "$PATH" = /System/Library/* ]]; then
+      safe=1
+    elif [[ "$PATH" = /Library/* ]]; then
+      safe=1
+    elif [[ "$PATH" = /usr/lib/* ]]; then
+      safe=1
+    fi
+
+    if [ $safe == 0 ]; then
+      echo "Error!"
+      echo "$file"
+      echo "${RELATIVE_PATH}${PATH}"
+      errors=1
+    fi
+
+  done < $tempFile
+}
+
+bundle=$1
+tempFile=/tmp/otoolOutput.txt
+errors=0
+
+if [ ! -e "$bundle" ]; then
+  echo "Error! $bundle does not exist!"
+  exit 1
+fi
+
+echo "Auditing dependencies and LC_RPATH's for $bundle"
+
+auditDirectory "$1"
+rm -f "$tempFile"
+
+if [ $errors == 1 ]; then
+  echo "Error, bad paths found!"
+  exit 1
+else
+  echo "No errors found."
+fi
